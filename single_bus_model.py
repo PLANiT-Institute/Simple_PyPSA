@@ -122,6 +122,11 @@ def create_single_bus_model(
     nuclear_capacity_mw=24000,
     nuclear_p_min_pu=0.8,  # Minimum nuclear power output as fraction of capacity
     nuclear_p_max_pu=1.0,  # Maximum nuclear power output as fraction of capacity
+    # Hydrogen parameters
+    hydrogen_capacity_mw=0,  # Hydrogen generator capacity (0 = disabled)
+    hydrogen_p_min_pu=0.0,  # Minimum hydrogen power output as fraction of capacity  
+    hydrogen_p_max_pu=1.0,  # Maximum hydrogen power output as fraction of capacity
+    hydrogen_marginal_cost=50,  # Marginal cost in $/MWh (fuel cost)
     # Load parameters
     annual_load_twh=50,  # Annual load in TWh
     # Storage parameters (aggregated ESS + PHS)
@@ -135,6 +140,7 @@ def create_single_bus_model(
     solar_extendable=True,
     wind_extendable=True,
     nuclear_extendable=False,
+    hydrogen_extendable=False,
     storage_extendable=True,
     # Maximum capacity limits as multiplier of p_nom_min
     max_capacity_multiplier=2.0,  # Maximum capacity as multiplier of p_nom_min (e.g., 2.0 = 2x p_nom_min)
@@ -142,6 +148,7 @@ def create_single_bus_model(
     solar_capital_cost=1000,     # $/kW
     wind_capital_cost=1500,      # $/kW  
     nuclear_capital_cost=6000,   # $/kW
+    hydrogen_capital_cost=1200,  # $/kW (hydrogen generator)
     storage_capital_cost=500     # $/kW (power capacity)
 ):
     """
@@ -266,6 +273,7 @@ def create_single_bus_model(
     network.add("Carrier", "solar", color="yellow")
     network.add("Carrier", "wind", color="blue")
     network.add("Carrier", "nuclear", color="red")
+    network.add("Carrier", "hydrogen", color="purple")
     network.add("Carrier", "electricity")
     
     # Get maximum values as installed capacity
@@ -340,6 +348,29 @@ def create_single_bus_model(
         nuclear_params["p_nom"] = nuclear_capacity_mw
     
     network.add("Generator", **nuclear_params)
+    
+    # Add hydrogen generator (dispatchable with unlimited fuel)
+    if hydrogen_capacity_mw > 0:
+        hydrogen_params = {
+            "name": "hydrogen",
+            "bus": "bus",
+            "carrier": "hydrogen",
+            "p_min_pu": hydrogen_p_min_pu,
+            "p_max_pu": hydrogen_p_max_pu,
+            "p_nom_extendable": hydrogen_extendable,
+            "marginal_cost": hydrogen_marginal_cost,  # Fuel cost ($/MWh)
+            "capital_cost": hydrogen_capital_cost
+        }
+        
+        if hydrogen_extendable:
+            hydrogen_params["p_nom_min"] = hydrogen_capacity_mw
+            hydrogen_params["p_nom_max"] = hydrogen_capacity_mw * max_capacity_multiplier
+            hydrogen_params["p_nom"] = hydrogen_capacity_mw  # Starting point
+        else:
+            hydrogen_params["p_nom"] = hydrogen_capacity_mw
+        
+        network.add("Generator", **hydrogen_params)
+        print(f"Added hydrogen generator: {hydrogen_capacity_mw} MW, marginal cost: ${hydrogen_marginal_cost}/MWh")
     
     # Add aggregated storage unit (ESS + PHS combined)
     network.add("Carrier", "storage")
@@ -594,8 +625,8 @@ def print_results(network):
     print(f"{'Technology':<15} {'Capacity (MW)':<15} {'Generation (GWh)':<18} {'Capacity Factor (%)':<18}")
     print("-" * 70)
     
-    # Print in order: nuclear, solar, wind
-    generator_order = ['nuclear', 'solar', 'wind']
+    # Print in order: nuclear, solar, wind, hydrogen
+    generator_order = ['nuclear', 'solar', 'wind', 'hydrogen']
     for gen in generator_order:
         if gen in network.generators.index:
             # Get installed capacity
@@ -654,10 +685,10 @@ def create_interactive_plots(network):
     # Extract time series data
     snapshots = network.snapshots
     
-    # Get generation data in order: nuclear, solar, wind
+    # Get generation data in order: nuclear, solar, wind, hydrogen
     gen_data = {}
     gen_available = {}  # Available generation (including curtailed)
-    generator_order = ['nuclear', 'solar', 'wind']
+    generator_order = ['nuclear', 'solar', 'wind', 'hydrogen']
     for gen in generator_order:
         if gen in network.generators.index:
             # Actual generation
@@ -701,8 +732,8 @@ def create_interactive_plots(network):
         vertical_spacing=0.1
     )
     
-    # Plot 1: Generation by source with demand overlay (nuclear, solar, wind, ESS)
-    colors = {'nuclear': 'rgba(255, 107, 107, 0.7)', 'solar': '#FFA500', 'wind': '#87CEEB', 'storage': '#32CD32'}
+    # Plot 1: Generation by source with demand overlay (nuclear, solar, wind, hydrogen, ESS)
+    colors = {'nuclear': 'rgba(255, 107, 107, 0.7)', 'solar': '#FFA500', 'wind': '#87CEEB', 'hydrogen': '#9370DB', 'storage': '#32CD32'}
     curtailed_colors = {'solar': 'rgba(255, 220, 150, 0.6)', 'wind': 'rgba(173, 216, 230, 0.6)'}  # Much lighter colors for curtailed
     
     # Create a stacked chart showing generation and ESS operation
@@ -750,7 +781,21 @@ def create_interactive_plots(network):
             row=1, col=1
         )
     
-    # 4. Add ESS discharge (positive contribution to generation)
+    # 4. Add hydrogen generation (stacked on wind)
+    if 'hydrogen' in gen_data:
+        fig.add_trace(
+            go.Scatter(
+                x=snapshots, 
+                y=gen_data['hydrogen'],
+                name='Hydrogen Generation',
+                line=dict(color=colors['hydrogen']),
+                stackgroup='generation',
+                hovertemplate='Hydrogen: %{y:.0f} MW<br>Time: %{x}<extra></extra>'
+            ),
+            row=1, col=1
+        )
+    
+    # 5. Add ESS discharge (positive contribution to generation)
     ess_discharge = network.storage_units_t.p_dispatch.loc[:, 'storage'].values  # Already positive for discharge
     fig.add_trace(
         go.Scatter(

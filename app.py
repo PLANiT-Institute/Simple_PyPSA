@@ -131,6 +131,54 @@ with left_col:
     
     nuclear_extendable = st.checkbox("Nuclear Extendable", value=False)
 
+    # Hydrogen parameters
+    st.subheader("🔋 Hydrogen Generation")
+    hydrogen_capacity = st.number_input(
+        "Hydrogen Capacity (MW)", 
+        value=0, 
+        min_value=0, 
+        max_value=50000, 
+        step=500,
+        help="Hydrogen generator capacity (0 = disabled, unlimited fuel source)"
+    )
+    
+    hydrogen_p_min_pu = st.number_input(
+        "Hydrogen p_min_pu", 
+        value=0.0, 
+        min_value=0.0, 
+        max_value=1.0, 
+        step=0.05,
+        help="Minimum hydrogen power output as fraction of capacity (0-1)"
+    )
+    
+    hydrogen_p_max_pu = st.number_input(
+        "Hydrogen p_max_pu", 
+        value=1.0, 
+        min_value=0.0, 
+        max_value=1.0, 
+        step=0.05,
+        help="Maximum hydrogen power output as fraction of capacity (0-1)"
+    )
+    
+    hydrogen_marginal_cost = st.number_input(
+        "Hydrogen Marginal Cost ($/MWh)", 
+        value=50.0, 
+        min_value=0.0, 
+        max_value=200.0, 
+        step=5.0,
+        help="Fuel cost for hydrogen generation (higher cost = less preferred)"
+    )
+    
+    hydrogen_cost = st.number_input(
+        "Hydrogen Capital Cost ($/kW)", 
+        value=1200, 
+        min_value=500, 
+        max_value=3000, 
+        step=100
+    )
+    
+    hydrogen_extendable = st.checkbox("Hydrogen Extendable", value=False)
+
     # Storage parameters
     st.subheader("🔋 Energy Storage")
     storage_capacity = st.number_input(
@@ -202,6 +250,10 @@ with left_col:
                     nuclear_capacity_mw=nuclear_capacity,
                     nuclear_p_min_pu=nuclear_p_min_pu,
                     nuclear_p_max_pu=nuclear_p_max_pu,
+                    hydrogen_capacity_mw=hydrogen_capacity,
+                    hydrogen_p_min_pu=hydrogen_p_min_pu,
+                    hydrogen_p_max_pu=hydrogen_p_max_pu,
+                    hydrogen_marginal_cost=hydrogen_marginal_cost,
                     annual_load_twh=annual_load,
                     storage_power_capacity_mw=storage_capacity,
                     storage_max_hours=storage_hours,
@@ -212,11 +264,13 @@ with left_col:
                     solar_extendable=solar_extendable,
                     wind_extendable=wind_extendable,
                     nuclear_extendable=nuclear_extendable,
+                    hydrogen_extendable=hydrogen_extendable,
                     storage_extendable=storage_extendable,
                     max_capacity_multiplier=max_capacity_multiplier,
                     solar_capital_cost=solar_cost,
                     wind_capital_cost=wind_cost,
                     nuclear_capital_cost=nuclear_cost,
+                    hydrogen_capital_cost=hydrogen_cost,
                     storage_capital_cost=storage_cost
                 )
                 
@@ -288,8 +342,8 @@ with right_col:
         st.subheader("📊 Output")
         
         output_data = []
-        # Define order: nuclear, solar, wind
-        generator_order = ['nuclear', 'solar', 'wind']
+        # Define order: nuclear, solar, wind, hydrogen
+        generator_order = ['nuclear', 'solar', 'wind', 'hydrogen']
         for gen in generator_order:
             if gen in model.generators.index:
                 try:
@@ -380,10 +434,10 @@ with right_col:
         # Create plots
         snapshots = model.snapshots
     
-        # Get generation data in order: nuclear, solar, wind
+        # Get generation data in order: nuclear, solar, wind, hydrogen
         gen_data = {}
         gen_available = {}  # Available generation (including curtailed)
-        generator_order = ['nuclear', 'solar', 'wind']
+        generator_order = ['nuclear', 'solar', 'wind', 'hydrogen']
         for gen in generator_order:
             if gen in model.generators.index:
                 try:
@@ -491,8 +545,8 @@ with right_col:
                    [{"secondary_y": False}]]
         )
     
-        # Colors for different technologies (nuclear, solar, wind, ESS)
-        colors = {'nuclear': 'rgba(255, 107, 107, 0.7)', 'solar': '#FFA500', 'wind': '#87CEEB', 'storage': '#32CD32'}
+        # Colors for different technologies (nuclear, solar, wind, hydrogen, ESS)
+        colors = {'nuclear': 'rgba(255, 107, 107, 0.7)', 'solar': '#FFA500', 'wind': '#87CEEB', 'hydrogen': '#9370DB', 'storage': '#32CD32'}
         curtailed_colors = {'solar': 'rgba(255, 220, 150, 0.6)', 'wind': 'rgba(173, 216, 230, 0.6)'}  # Much lighter colors for curtailed
     
         # Plot 1: Generation by source with demand overlay
@@ -540,7 +594,21 @@ with right_col:
                 row=1, col=1
             )
         
-        # 4. Add ESS discharge (positive contribution to generation)
+        # 4. Add hydrogen generation (stacked on wind)
+        if 'hydrogen' in gen_data:
+            fig.add_trace(
+                go.Scatter(
+                    x=snapshots, 
+                    y=gen_data['hydrogen'],
+                    name='Hydrogen Generation',
+                    line=dict(color=colors['hydrogen']),
+                    stackgroup='generation',
+                    hovertemplate='Hydrogen: %{y:.0f} MW<br>Time: %{x}<extra></extra>'
+                ),
+                row=1, col=1
+            )
+        
+        # 5. Add ESS discharge (positive contribution to generation)
         if 'storage' in model.storage_units.index:
             fig.add_trace(
                 go.Scatter(
