@@ -34,7 +34,7 @@ with left_col:
         help="Total annual electricity demand"
     )
     
-    max_capacity_multiplier = st.slider(
+    max_capacity_multiplier = st.number_input(
         "Max Capacity Multiplier",
         min_value=0.5,
         max_value=50.0,
@@ -45,9 +45,9 @@ with left_col:
     
     solver = st.selectbox(
         "Optimization Solver",
-        options=["highs", "gurobi", "cplex", "glpk"],
+        options=["highs", "cbc", "gurobi", "cplex", "glpk"],
         index=0,
-        help="Choose optimization solver"
+        help="Choose optimization solver (CBC recommended for storage constraints)"
     )
 
     # Solar parameters
@@ -96,29 +96,29 @@ with left_col:
     st.subheader("⚛️ Nuclear Generation")
     nuclear_capacity = st.number_input(
         "Nuclear Capacity (MW)", 
-        value=1200, 
+        value=24000, 
         min_value=0, 
         max_value=50000, 
         step=100,
         help="Nuclear plant capacity"
     )
     
-    nuclear_cf = st.number_input(
-        "Nuclear Capacity Factor",
-        value=0.90,
-        min_value=0.1,
-        max_value=1.0,
-        step=0.05,
-        help="Nuclear plant capacity factor (0-1)"
-    )
-    
     nuclear_p_min_pu = st.number_input(
         "Nuclear p_min_pu", 
-        value=0.3, 
+        value=0.8, 
         min_value=0.0, 
         max_value=1.0, 
         step=0.05,
         help="Minimum nuclear power output as fraction of capacity (0-1)"
+    )
+    
+    nuclear_p_max_pu = st.number_input(
+        "Nuclear p_max_pu", 
+        value=1.0, 
+        min_value=0.0, 
+        max_value=1.0, 
+        step=0.05,
+        help="Maximum nuclear power output as fraction of capacity (0-1)"
     )
     
     nuclear_cost = st.number_input(
@@ -177,6 +177,15 @@ with left_col:
     )
     
     storage_extendable = st.checkbox("Storage Extendable", value=True)
+    
+    storage_initial_soc = st.number_input(
+        "Initial State of Charge",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.5,
+        step=0.05,
+        help="Initial state of charge as fraction of maximum energy capacity (0-1)"
+    )
 
     # Run optimization button
     st.markdown("---")
@@ -191,14 +200,15 @@ with left_col:
                     solar_capacity_mw=solar_capacity,
                     wind_capacity_mw=wind_capacity,
                     nuclear_capacity_mw=nuclear_capacity,
-                    nuclear_capacity_factor=nuclear_cf,
                     nuclear_p_min_pu=nuclear_p_min_pu,
+                    nuclear_p_max_pu=nuclear_p_max_pu,
                     annual_load_twh=annual_load,
                     storage_power_capacity_mw=storage_capacity,
                     storage_max_hours=storage_hours,
                     storage_efficiency=storage_efficiency,
                     storage_charge_efficiency=storage_charge_efficiency,
                     storage_discharge_efficiency=storage_discharge_efficiency,
+                    storage_initial_soc=storage_initial_soc,
                     solar_extendable=solar_extendable,
                     wind_extendable=wind_extendable,
                     nuclear_extendable=nuclear_extendable,
@@ -214,11 +224,19 @@ with left_col:
                 success = run_model_optimization(model, solver=solver)
                 
                 if success:
-                    st.session_state.model = model
-                    st.session_state.optimization_success = True
-                    st.success("✅ Optimization completed successfully!")
+                    # Check if optimization actually produced results
+                    if hasattr(model, 'generators_t') and hasattr(model.generators_t, 'p'):
+                        st.session_state.model = model
+                        st.session_state.optimization_success = True
+                        st.success("✅ Optimization completed successfully!")
+                    else:
+                        st.error("❌ Optimization completed but produced no results. Try a different solver.")
+                        st.session_state.optimization_success = False
+                        # Store the model anyway for debugging
+                        st.session_state.model = model
+                        st.session_state.partial_results = True
                 else:
-                    st.error("❌ Optimization failed. Please check your parameters.")
+                    st.error("❌ Optimization failed. Please check your parameters or try a different solver.")
                     st.session_state.optimization_success = False
                     
             except Exception as e:
@@ -266,20 +284,51 @@ with right_col:
             num_snapshots = len(model.snapshots)
             st.metric("Time Snapshots", f"{num_snapshots:,}")
         
-        # Capacity breakdown
-        st.subheader("🔋 Installed Capacities")
+        # Output breakdown
+        st.subheader("📊 Output")
         
-        capacity_data = []
-        for gen in model.generators.index:
-            if model.generators.loc[gen, 'p_nom_extendable']:
-                capacity = model.generators.loc[gen, 'p_nom_opt']
-            else:
-                capacity = model.generators.loc[gen, 'p_nom']
-            capacity_data.append({
-                'Technology': gen.title(),
-                'Capacity (MW)': capacity,
-                'Capacity (GW)': capacity/1000
-            })
+        output_data = []
+        # Define order: nuclear, solar, wind
+        generator_order = ['nuclear', 'solar', 'wind']
+        for gen in generator_order:
+            if gen in model.generators.index:
+                try:
+                    # Get installed capacity
+                    if model.generators.loc[gen, 'p_nom_extendable']:
+                        capacity = model.generators.loc[gen, 'p_nom_opt']
+                    else:
+                        capacity = model.generators.loc[gen, 'p_nom']
+                    
+                    # Get actual generation (sum over all time periods) - check if results exist
+                    if hasattr(model, 'generators_t') and hasattr(model.generators_t, 'p') and gen in model.generators_t.p.columns:
+                        actual_generation = model.generators_t.p.loc[:, gen].sum()  # MWh
+                        generation_gwh = actual_generation / 1000  # Convert to GWh
+                        
+                        # Calculate capacity factor
+                        if capacity > 0:
+                            max_possible_generation = capacity * len(model.snapshots)  # MW * hours = MWh
+                            capacity_factor = (actual_generation / max_possible_generation) * 100  # Percentage
+                        else:
+                            capacity_factor = 0
+                    else:
+                        # No optimization results available
+                        generation_gwh = 0
+                        capacity_factor = 0
+                    
+                    output_data.append({
+                        'Technology': gen.title(),
+                        'Installed Capacity (MW)': capacity,
+                        'Generation (GWh)': generation_gwh,
+                        'Capacity Factor (%)': capacity_factor
+                    })
+                except Exception as e:
+                    st.warning(f"Could not process {gen} generator data: {e}")
+                    output_data.append({
+                        'Technology': gen.title(),
+                        'Installed Capacity (MW)': 0,
+                        'Generation (GWh)': 0,
+                        'Capacity Factor (%)': 0
+                    })
         
         for storage in model.storage_units.index:
             if model.storage_units.loc[storage, 'p_nom_extendable']:
@@ -290,19 +339,40 @@ with right_col:
             max_hours = model.storage_units.loc[storage, 'max_hours']
             energy_capacity = power_capacity * max_hours
             
-            capacity_data.append({
-                'Technology': f'{storage.title()} (Power)',
-                'Capacity (MW)': power_capacity,
-                'Capacity (GW)': power_capacity/1000
+            # Get storage discharge (energy delivered)
+            storage_discharge = model.storage_units_t.p_dispatch.loc[:, storage].sum()  # MWh
+            discharge_gwh = storage_discharge / 1000  # Convert to GWh
+            
+            # Calculate capacity factor for storage (based on discharge)
+            if power_capacity > 0:
+                max_possible_discharge = power_capacity * len(model.snapshots)  # MW * hours = MWh
+                storage_capacity_factor = (storage_discharge / max_possible_discharge) * 100  # Percentage
+            else:
+                storage_capacity_factor = 0
+            
+            # Use "ESS" instead of storage name
+            storage_name = "ESS" if storage == "storage" else storage.title()
+            output_data.append({
+                'Technology': f'{storage_name} (Power)',
+                'Installed Capacity (MW)': power_capacity,
+                'Generation (GWh)': discharge_gwh,
+                'Capacity Factor (%)': storage_capacity_factor
             })
-            capacity_data.append({
-                'Technology': f'{storage.title()} (Energy)',
-                'Capacity (MW)': energy_capacity,
-                'Capacity (GW)': energy_capacity/1000
+            output_data.append({
+                'Technology': f'{storage_name} (Energy)',
+                'Installed Capacity (MW)': energy_capacity,
+                'Generation (GWh)': discharge_gwh,
+                'Capacity Factor (%)': 'N/A'
             })
         
-        df_capacity = pd.DataFrame(capacity_data)
-        st.dataframe(df_capacity, use_container_width=True)
+        df_output = pd.DataFrame(output_data)
+        # Format the dataframe for better display
+        df_output['Installed Capacity (MW)'] = df_output['Installed Capacity (MW)'].round(1)
+        df_output['Generation (GWh)'] = df_output['Generation (GWh)'].round(2)
+        df_output['Capacity Factor (%)'] = df_output['Capacity Factor (%)'].apply(
+            lambda x: f"{x:.1f}%" if isinstance(x, (int, float)) else x
+        )
+        st.dataframe(df_output, use_container_width=True)
     
         # Interactive plots
         st.header("📈 System Operation Analysis")
@@ -310,17 +380,95 @@ with right_col:
         # Create plots
         snapshots = model.snapshots
     
-        # Get generation data
+        # Get generation data in order: nuclear, solar, wind
         gen_data = {}
-        for gen in model.generators.index:
-            capacity = model.generators_t.p.loc[:, gen].values
-            gen_data[gen] = capacity
+        gen_available = {}  # Available generation (including curtailed)
+        generator_order = ['nuclear', 'solar', 'wind']
+        for gen in generator_order:
+            if gen in model.generators.index:
+                try:
+                    # Check if optimization results exist
+                    if hasattr(model, 'generators_t') and hasattr(model.generators_t, 'p') and gen in model.generators_t.p.columns:
+                        # Actual generation
+                        actual_generation = model.generators_t.p.loc[:, gen].values
+                        gen_data[gen] = actual_generation
+                        
+                        # Available generation (capacity * p_max_pu)
+                        if model.generators.loc[gen, 'p_nom_extendable']:
+                            capacity = model.generators.loc[gen, 'p_nom_opt']
+                        else:
+                            capacity = model.generators.loc[gen, 'p_nom']
+                        
+                        # Get p_max_pu profile
+                        if hasattr(model.generators_t, 'p_max_pu') and gen in model.generators_t.p_max_pu.columns:
+                            p_max_pu = model.generators_t.p_max_pu.loc[:, gen].values
+                        else:
+                            p_max_pu = np.ones(len(snapshots)) * model.generators.loc[gen, 'p_max_pu']
+                        
+                        available_generation = capacity * p_max_pu
+                        gen_available[gen] = available_generation
+                    else:
+                        # No optimization results - create zero arrays
+                        gen_data[gen] = np.zeros(len(snapshots))
+                        gen_available[gen] = np.zeros(len(snapshots))
+                        
+                except Exception as e:
+                    st.warning(f"Could not process {gen} generation data: {e}")
+                    gen_data[gen] = np.zeros(len(snapshots))
+                    gen_available[gen] = np.zeros(len(snapshots))
     
         # Get storage data
         if 'storage' in model.storage_units.index:
-            storage_charge = model.storage_units_t.p_store.loc[:, 'storage'].values
-            storage_discharge = -model.storage_units_t.p_dispatch.loc[:, 'storage'].values
-            storage_soc = model.storage_units_t.state_of_charge.loc[:, 'storage'].values
+            try:
+                # Check if optimization results exist for storage
+                if (hasattr(model, 'storage_units_t') and 
+                    hasattr(model.storage_units_t, 'p_store') and 
+                    'storage' in model.storage_units_t.p_store.columns):
+                    # Get the corrected storage data from the model (after _fix_simultaneous_storage_operation)
+                    p_store_raw = model.storage_units_t.p_store.loc[:, 'storage'].values
+                    p_dispatch_raw = model.storage_units_t.p_dispatch.loc[:, 'storage'].values
+                    
+                    # Check for simultaneous operations in the data
+                    threshold = 0.0001
+                    simultaneous = (p_store_raw > threshold) & (p_dispatch_raw > threshold)
+                    
+                    if simultaneous.any():
+                        count = simultaneous.sum()
+                        st.warning(f"⚠️ Found {count} periods with simultaneous charge/discharge in the display data. This suggests the post-processing fix didn't work properly.")
+                        
+                        # Apply the fix directly in the app for display purposes
+                        p_store_fixed = p_store_raw.copy()
+                        p_dispatch_fixed = p_dispatch_raw.copy()
+                        
+                        for i, is_simultaneous in enumerate(simultaneous):
+                            if is_simultaneous:
+                                if p_store_raw[i] > p_dispatch_raw[i]:
+                                    # Keep charging, remove discharging
+                                    p_dispatch_fixed[i] = 0.0
+                                else:
+                                    # Keep discharging, remove charging
+                                    p_store_fixed[i] = 0.0
+                        
+                        # Use the fixed values
+                        storage_charge = -p_store_fixed  # Charging should be negative
+                        storage_discharge = p_dispatch_fixed  # Discharging should be positive
+                    else:
+                        # No simultaneous operations detected, use original data
+                        storage_charge = -p_store_raw  # Charging should be negative
+                        storage_discharge = p_dispatch_raw  # Discharging should be positive
+                        st.success("✅ No simultaneous charge/discharge detected in storage operation.")
+                    
+                    storage_soc = model.storage_units_t.state_of_charge.loc[:, 'storage'].values
+                else:
+                    # No optimization results for storage
+                    storage_charge = np.zeros(len(snapshots))
+                    storage_discharge = np.zeros(len(snapshots))
+                    storage_soc = np.zeros(len(snapshots))
+            except Exception as e:
+                st.warning(f"Could not process storage data: {e}")
+                storage_charge = np.zeros(len(snapshots))
+                storage_discharge = np.zeros(len(snapshots))
+                storage_soc = np.zeros(len(snapshots))
         else:
             storage_charge = np.zeros(len(snapshots))
             storage_discharge = np.zeros(len(snapshots))
@@ -334,8 +482,8 @@ with right_col:
             rows=3, cols=1,
             subplot_titles=(
                 'Hourly Generation vs Demand', 
-                'Storage Charge/Discharge', 
-                'Storage State of Charge'
+                'ESS Charge/Discharge', 
+                'ESS State of Charge'
             ),
             vertical_spacing=0.1,
             specs=[[{"secondary_y": False}],
@@ -343,19 +491,79 @@ with right_col:
                    [{"secondary_y": False}]]
         )
     
-        # Colors for different technologies
-        colors = {'solar': '#FFA500', 'wind': '#87CEEB', 'nuclear': '#FF6B6B', 'storage': '#32CD32'}
+        # Colors for different technologies (nuclear, solar, wind, ESS)
+        colors = {'nuclear': 'rgba(255, 107, 107, 0.7)', 'solar': '#FFA500', 'wind': '#87CEEB', 'storage': '#32CD32'}
+        curtailed_colors = {'solar': 'rgba(255, 220, 150, 0.6)', 'wind': 'rgba(173, 216, 230, 0.6)'}  # Much lighter colors for curtailed
     
         # Plot 1: Generation by source with demand overlay
-        for gen, data in gen_data.items():
+        
+        # 1. Add nuclear generation (semi-transparent base)
+        if 'nuclear' in gen_data:
             fig.add_trace(
                 go.Scatter(
                     x=snapshots, 
-                    y=data,
-                    name=f'{gen.title()} Generation',
-                    line=dict(color=colors.get(gen, '#000000')),
+                    y=gen_data['nuclear'],
+                    name='Nuclear Generation',
+                    line=dict(color=colors['nuclear']),
+                    fill='tozeroy',
                     stackgroup='generation',
-                    hovertemplate=f'{gen.title()}: %{{y:.0f}} MW<br>Time: %{{x}}<extra></extra>'
+                    hovertemplate='Nuclear: %{y:.0f} MW<br>Time: %{x}<extra></extra>'
+                ),
+                row=1, col=1
+            )
+        
+        # 2. Add actual solar generation (stacked on nuclear)
+        if 'solar' in gen_data:
+            fig.add_trace(
+                go.Scatter(
+                    x=snapshots, 
+                    y=gen_data['solar'],
+                    name='Solar Generation',
+                    line=dict(color=colors['solar']),
+                    stackgroup='generation',
+                    hovertemplate='Solar: %{y:.0f} MW<br>Time: %{x}<extra></extra>'
+                ),
+                row=1, col=1
+            )
+        
+        # 3. Add actual wind generation (stacked on solar)
+        if 'wind' in gen_data:
+            fig.add_trace(
+                go.Scatter(
+                    x=snapshots, 
+                    y=gen_data['wind'],
+                    name='Wind Generation',
+                    line=dict(color=colors['wind']),
+                    stackgroup='generation',
+                    hovertemplate='Wind: %{y:.0f} MW<br>Time: %{x}<extra></extra>'
+                ),
+                row=1, col=1
+            )
+        
+        # 4. Add ESS discharge (positive contribution to generation)
+        if 'storage' in model.storage_units.index:
+            fig.add_trace(
+                go.Scatter(
+                    x=snapshots,
+                    y=storage_discharge,  # Use the correctly processed positive discharge values
+                    name='ESS Discharging',
+                    line=dict(color='red'),
+                    stackgroup='generation',
+                    hovertemplate='ESS Discharging: %{y:.0f} MW<br>Time: %{x}<extra></extra>'
+                ),
+                row=1, col=1
+            )
+        
+        # 5. Add ESS charge (negative values - consuming power)
+        if 'storage' in model.storage_units.index:
+            fig.add_trace(
+                go.Scatter(
+                    x=snapshots,
+                    y=storage_charge,  # Use the correctly processed negative charge values
+                    name='ESS Charging',
+                    line=dict(color='green'),
+                    fill='tozeroy',
+                    hovertemplate='ESS Charging: %{y:.0f} MW<br>Time: %{x}<extra></extra>'
                 ),
                 row=1, col=1
             )
@@ -372,39 +580,40 @@ with right_col:
             row=1, col=1
         )
     
-        # Plot 2: Storage charge/discharge
+        # Plot 2: Storage charge/discharge as bar chart (mutually exclusive)
+        # Combine charge and discharge into a single series where:
+        # - Negative values = charging (green bars going down)
+        # - Positive values = discharging (red bars going up)
+        
+        # Create combined storage operation data
+        storage_combined = np.where(
+            np.abs(storage_charge) > np.abs(storage_discharge),
+            storage_charge,  # Use charging (negative values)
+            storage_discharge  # Use discharging (positive values)
+        )
+        
+        # Create colors array - green for negative (charging), red for positive (discharging)
+        colors_array = ['green' if val < 0 else 'red' for val in storage_combined]
+        
         fig.add_trace(
-            go.Scatter(
+            go.Bar(
                 x=snapshots,
-                y=storage_charge,
-                name='Storage Charging',
-                line=dict(color='green'),
-                fill='tozeroy',
-                hovertemplate='Charging: %{y:.0f} MW<br>Time: %{x}<extra></extra>'
+                y=storage_combined,
+                name='ESS Operation',
+                marker=dict(color=colors_array),
+                hovertemplate='ESS: %{y:.0f} MW<br>Time: %{x}<br>' +
+                             '<i>Negative = Charging, Positive = Discharging</i><extra></extra>'
             ),
             row=2, col=1
         )
     
+        # Plot 3: ESS state of charge as bar chart
         fig.add_trace(
-            go.Scatter(
-                x=snapshots,
-                y=storage_discharge,
-                name='Storage Discharging',
-                line=dict(color='red'),
-                fill='tozeroy',
-                hovertemplate='Discharging: %{y:.0f} MW<br>Time: %{x}<extra></extra>'
-            ),
-            row=2, col=1
-        )
-    
-        # Plot 3: Storage state of charge
-        fig.add_trace(
-            go.Scatter(
+            go.Line(
                 x=snapshots,
                 y=storage_soc,
-                name='State of Charge',
-                line=dict(color='blue'),
-                fill='tozeroy',
+                name='ESS State of Charge',
+                marker=dict(color='blue'),
                 hovertemplate='SoC: %{y:.0f} MWh<br>Time: %{x}<extra></extra>'
             ),
             row=3, col=1
@@ -422,7 +631,14 @@ with right_col:
         fig.update_yaxes(title_text="Power (MW)", row=1, col=1)
         fig.update_yaxes(title_text="Power (MW)", row=2, col=1)
         fig.update_yaxes(title_text="Energy (MWh)", row=3, col=1)
+        
+        # Update x-axis labels and synchronize x-axes
         fig.update_xaxes(title_text="Time", row=3, col=1)
+        
+        # Synchronize x-axes across all three subplots
+        fig.update_xaxes(matches='x', row=1, col=1)
+        fig.update_xaxes(matches='x', row=2, col=1)
+        fig.update_xaxes(matches='x', row=3, col=1)
     
         # Display the plot
         st.plotly_chart(fig, use_container_width=True)
@@ -436,14 +652,14 @@ with right_col:
             # Create comprehensive dataframe
             df_timeseries = pd.DataFrame(index=snapshots)
             
-            # Add generation data
+            # Add generation data in order: nuclear, solar, wind
             for gen, data in gen_data.items():
                 df_timeseries[f'{gen.title()} Generation (MW)'] = data
             
             # Add storage data
-            df_timeseries['Storage Charging (MW)'] = storage_charge
-            df_timeseries['Storage Discharging (MW)'] = storage_discharge
-            df_timeseries['Storage SoC (MWh)'] = storage_soc
+            df_timeseries['ESS Charging (MW)'] = storage_charge
+            df_timeseries['ESS Discharging (MW)'] = storage_discharge
+            df_timeseries['ESS SoC (MWh)'] = storage_soc
             
             # Add load data
             df_timeseries['Demand (MW)'] = load_data
@@ -468,7 +684,7 @@ with right_col:
             
             stats_data.extend([
                 {
-                    'Component': 'Storage Charging',
+                    'Component': 'ESS Charging',
                     'Mean (MW)': np.mean(storage_charge),
                     'Max (MW)': np.max(storage_charge),
                     'Min (MW)': np.min(storage_charge),
@@ -476,7 +692,7 @@ with right_col:
                     'Total Energy (MWh)': np.sum(storage_charge)
                 },
                 {
-                    'Component': 'Storage Discharging',
+                    'Component': 'ESS Discharging',
                     'Mean (MW)': np.mean(np.abs(storage_discharge)),
                     'Max (MW)': np.max(np.abs(storage_discharge)),
                     'Min (MW)': np.min(np.abs(storage_discharge)),
@@ -513,11 +729,11 @@ with right_col:
             
             with col2:
                 # Download capacity data
-                csv_capacity = df_capacity.to_csv(index=False)
+                csv_output = df_output.to_csv(index=False)
                 st.download_button(
-                    label="📄 Download Capacity CSV", 
-                    data=csv_capacity,
-                    file_name="energy_system_capacities.csv",
+                    label="📄 Download Output CSV", 
+                    data=csv_output,
+                    file_name="energy_system_output.csv",
                     mime="text/csv"
                 )
 

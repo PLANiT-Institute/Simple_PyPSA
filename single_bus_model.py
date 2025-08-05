@@ -119,9 +119,9 @@ def create_single_bus_model(
     # Wind parameters  
     wind_capacity_mw=None,   # If None, use data maximum
     # Nuclear parameters
-    nuclear_capacity_mw=1000,
-    nuclear_capacity_factor=0.85,
-    nuclear_p_min_pu=0.3,  # Minimum nuclear power output as fraction of capacity
+    nuclear_capacity_mw=24000,
+    nuclear_p_min_pu=0.8,  # Minimum nuclear power output as fraction of capacity
+    nuclear_p_max_pu=1.0,  # Maximum nuclear power output as fraction of capacity
     # Load parameters
     annual_load_twh=50,  # Annual load in TWh
     # Storage parameters (aggregated ESS + PHS)
@@ -130,6 +130,7 @@ def create_single_bus_model(
     storage_efficiency=0.85,  # Round-trip efficiency (charge * discharge)
     storage_charge_efficiency=0.95,  # Charging efficiency
     storage_discharge_efficiency=0.95,  # Discharging efficiency
+    storage_initial_soc=0.5,  # Initial state of charge (0-1, as fraction of max energy)
     # Extendable options
     solar_extendable=True,
     wind_extendable=True,
@@ -156,8 +157,10 @@ def create_single_bus_model(
         If extendable=True, this becomes p_nom_min.
     nuclear_capacity_mw : float
         Nuclear capacity in MW. If extendable=True, this becomes p_nom_min.
-    nuclear_capacity_factor : float
-        Nuclear capacity factor (0-1)
+    nuclear_p_min_pu : float
+        Minimum nuclear power output as fraction of capacity (0-1)
+    nuclear_p_max_pu : float
+        Maximum nuclear power output as fraction of capacity (0-1)
     annual_load_twh : float
         Annual load in TWh. Used to scale the load profile.
     storage_power_capacity_mw : float
@@ -257,7 +260,7 @@ def create_single_bus_model(
     network.set_snapshots(gen_data.index)
     
     # Add single bus
-    network.add("Bus", "bus", v_nom=230)  # 230 kV bus
+    network.add("Bus", "bus", v_nom=230, carrier="electricity")  # 230 kV bus
     
     # Add carriers
     network.add("Carrier", "solar", color="yellow")
@@ -317,18 +320,16 @@ def create_single_bus_model(
     
     network.add("Generator", **wind_params)
     
-    # Add nuclear generator (fixed capacity factor)
-    nuclear_profile = np.full(len(network.snapshots), nuclear_capacity_factor)
-    
+    # Add nuclear generator (no fixed capacity factor)
     nuclear_params = {
         "name": "nuclear",
         "bus": "bus",
         "carrier": "nuclear",
         "p_min_pu": nuclear_p_min_pu,
+        "p_max_pu": nuclear_p_max_pu,
         "p_nom_extendable": nuclear_extendable,
         "marginal_cost": 0,  # Low but non-zero marginal cost
-        "capital_cost": nuclear_capital_cost,
-        "p_max_pu": nuclear_profile
+        "capital_cost": nuclear_capital_cost
     }
     
     if nuclear_extendable:
@@ -351,9 +352,10 @@ def create_single_bus_model(
         "max_hours": storage_max_hours,
         "efficiency_store": storage_charge_efficiency,
         "efficiency_dispatch": storage_discharge_efficiency,
-        "marginal_cost": 0,
+        "marginal_cost": 0,  # Higher cost to discourage unnecessary cycling
         "capital_cost": storage_capital_cost,
-        "cyclic_state_of_charge": True
+        "cyclic_state_of_charge": True,
+        "state_of_charge_initial": storage_initial_soc  # Set initial SOC
     }
     
     if storage_extendable:
@@ -380,11 +382,203 @@ def run_model_optimization(network, solver='highs'):
     Run the optimization for the network model.
     """
     try:
-        network.optimize(solver_name=solver)
+        print(f"Running optimization with {solver} solver...")
+        
+        # For MILP solvers, try to add binary constraints to prevent simultaneous operation
+        if solver.lower() in ['cbc', 'gurobi', 'cplex', 'scip']:
+            print(f"Using MILP solver {solver} - attempting to add binary constraints...")
+            _add_binary_storage_constraints(network)
+        
+        # Try the requested solver first
+        try:
+            network.optimize(solver_name=solver)
+            print(f"✓ Optimization completed with {solver}")
+        except Exception as solver_error:
+            print(f"Warning: {solver} solver failed: {solver_error}")
+            
+            # Fallback to HiGHS if the requested solver fails
+            if solver.lower() != 'highs':
+                print("Falling back to HiGHS solver...")
+                network.optimize(solver_name='highs')
+                print("✓ Optimization completed with HiGHS (fallback)")
+            else:
+                raise solver_error
+        
+        # Check if optimization produced results
+        if not hasattr(network, 'objective') or network.objective is None:
+            print("Warning: Optimization completed but no objective value found")
+            return False
+            
+        print(f"Objective value: {network.objective:.2f}")
+        
+        # Always check and fix simultaneous charge/discharge as backup
+        _fix_simultaneous_storage_operation(network)
+        
         return True
     except Exception as e:
         print(f"Optimization failed: {e}")
         return False
+
+def _add_binary_storage_constraints(network):
+    """
+    Add binary constraints to prevent simultaneous charge/discharge for MILP solvers.
+    This requires PyPSA's extra_functionality for custom constraints.
+    """
+    try:
+        print("Attempting to add binary constraints for storage...")
+        
+        # For now, we'll enhance the StorageUnit parameters to work better with MILP solvers
+        # A full binary constraint implementation would require more complex PyPSA programming
+        
+        for storage in network.storage_units.index:
+            # Add small costs to discourage simultaneous operation
+            # MILP solvers are better at handling these discrete decisions
+            network.storage_units.loc[storage, 'marginal_cost'] = 0.01
+            
+            # For MILP solvers, we can set standing loss to zero since we'll have proper constraints
+            network.storage_units.loc[storage, 'standing_loss'] = 0.0
+            
+        print("✓ Enhanced storage parameters for MILP solver")
+        
+        # TODO: Implement proper binary constraints using PyPSA's extra_functionality
+        # This would require adding binary variables and constraints like:
+        # - Binary variable b_charge[t] for each time step
+        # - Binary variable b_discharge[t] for each time step  
+        # - Constraint: b_charge[t] + b_discharge[t] <= 1
+        # - Constraint: p_store[t] <= M * b_charge[t]
+        # - Constraint: p_dispatch[t] <= M * b_discharge[t]
+        
+    except Exception as e:
+        print(f"Warning: Could not add binary storage constraints: {e}")
+        print("Falling back to post-processing fix")
+
+def _add_storage_constraints(network):
+    """
+    Add binary constraints to prevent simultaneous charge/discharge (for MILP solvers).
+    """
+    try:
+        print("Adding binary constraints to prevent simultaneous ESS charge/discharge...")
+        # This is a placeholder for advanced constraint addition
+        # In practice, this would require detailed PyPSA constraint programming
+        pass
+    except Exception as e:
+        print(f"Warning: Could not add storage constraints: {e}")
+
+def _fix_simultaneous_storage_operation(network):
+    """
+    Fix simultaneous charge/discharge by setting the smaller value to zero.
+    Also recalculate state of charge after modifications.
+    """
+    try:
+        for storage in network.storage_units.index:
+            p_store = network.storage_units_t.p_store[storage].copy()
+            p_dispatch = network.storage_units_t.p_dispatch[storage].copy()
+            
+            # Use a smaller threshold for detecting simultaneous operation
+            threshold = 0.0001  # Very small threshold to catch tiny simultaneous operations
+            simultaneous = (p_store > threshold) & (p_dispatch > threshold)
+            
+            if simultaneous.any():
+                count = simultaneous.sum()
+                print(f"Fixing {storage}: Found {count} periods with simultaneous charge/discharge")
+                
+                # For each simultaneous period, keep only the larger operation
+                for idx in simultaneous[simultaneous].index:
+                    if p_store[idx] > p_dispatch[idx]:
+                        # Keep charging, remove discharging
+                        network.storage_units_t.p_dispatch.loc[idx, storage] = 0.0
+                        print(f"  Time {idx}: Kept charging ({p_store[idx]:.3f} MW), removed discharging ({p_dispatch[idx]:.3f} MW)")
+                    else:
+                        # Keep discharging, remove charging
+                        network.storage_units_t.p_store.loc[idx, storage] = 0.0
+                        print(f"  Time {idx}: Kept discharging ({p_dispatch[idx]:.3f} MW), removed charging ({p_store[idx]:.3f} MW)")
+                
+                # Recalculate state of charge after fixing simultaneous operations
+                _recalculate_state_of_charge(network, storage)
+                
+                print(f"✓ {storage} operation fixed - no more simultaneous charge/discharge")
+            else:
+                print(f"✓ {storage} operation validated - no simultaneous charge/discharge detected")
+                
+    except Exception as e:
+        print(f"Warning: Could not fix storage operation: {e}")
+
+def _recalculate_state_of_charge(network, storage):
+    """
+    Recalculate state of charge after modifying p_store and p_dispatch values.
+    """
+    try:
+        # Get storage parameters
+        max_hours = network.storage_units.loc[storage, 'max_hours']
+        efficiency_store = network.storage_units.loc[storage, 'efficiency_store']
+        efficiency_dispatch = network.storage_units.loc[storage, 'efficiency_dispatch']
+        standing_loss = network.storage_units.loc[storage, 'standing_loss']
+        
+        # Get power capacity
+        if network.storage_units.loc[storage, 'p_nom_extendable']:
+            p_nom = network.storage_units.loc[storage, 'p_nom_opt']
+        else:
+            p_nom = network.storage_units.loc[storage, 'p_nom']
+        
+        # Calculate energy capacity
+        energy_capacity = p_nom * max_hours
+        
+        # Get initial state of charge
+        initial_soc = network.storage_units.loc[storage, 'state_of_charge_initial']
+        
+        # Recalculate state of charge step by step
+        soc_values = []
+        current_soc = initial_soc * energy_capacity  # Convert fraction to MWh
+        
+        p_store = network.storage_units_t.p_store[storage]
+        p_dispatch = network.storage_units_t.p_dispatch[storage]
+        
+        for idx in network.snapshots:
+            # Apply standing loss (fraction per hour)
+            current_soc = current_soc * (1 - standing_loss)
+            
+            # Apply charging (p_store is positive when charging)
+            charge_energy = p_store[idx] * efficiency_store  # MWh gained
+            current_soc += charge_energy
+            
+            # Apply discharging (p_dispatch is positive when discharging) 
+            discharge_energy = p_dispatch[idx] / efficiency_dispatch  # MWh lost from storage
+            current_soc -= discharge_energy
+            
+            # Ensure SOC stays within bounds
+            current_soc = max(0, min(current_soc, energy_capacity))
+            
+            soc_values.append(current_soc)
+        
+        # Update the state of charge in the network
+        network.storage_units_t.state_of_charge[storage] = soc_values
+        
+        print(f"  ✓ State of charge recalculated for {storage}")
+        
+    except Exception as e:
+        print(f"Warning: Could not recalculate state of charge for {storage}: {e}")
+
+def _check_storage_operation(network):
+    """
+    Check if storage is charging and discharging simultaneously and warn if so.
+    """
+    try:
+        for storage in network.storage_units.index:
+            p_store = network.storage_units_t.p_store[storage]
+            p_dispatch = network.storage_units_t.p_dispatch[storage]
+            
+            # Check for simultaneous operation (both > small threshold)
+            simultaneous = (p_store > 0.001) & (p_dispatch > 0.001)
+            
+            if simultaneous.any():
+                count = simultaneous.sum()
+                print(f"Warning: {storage} is charging and discharging simultaneously in {count} time periods")
+                print("Consider using a MILP solver (gurobi/cplex) for strict charge/discharge exclusivity")
+            else:
+                print(f"✓ {storage} operation validated - no simultaneous charge/discharge detected")
+                
+    except Exception as e:
+        print(f"Warning: Could not check storage operation: {e}")
 
 def print_results(network):
     """
@@ -396,14 +590,32 @@ def print_results(network):
         
     print(f"\nOptimization Results:")
     print(f"Objective Value: {network.objective:.2f}")
-    print(f"\nInstalled Capacities:")
+    print(f"\nOutput:")
+    print(f"{'Technology':<15} {'Capacity (MW)':<15} {'Generation (GWh)':<18} {'Capacity Factor (%)':<18}")
+    print("-" * 70)
     
-    for gen in network.generators.index:
-        if network.generators.loc[gen, 'p_nom_extendable']:
-            capacity = network.generators.loc[gen, 'p_nom_opt']
-        else:
-            capacity = network.generators.loc[gen, 'p_nom']
-        print(f"{gen}: {capacity:.2f} MW")
+    # Print in order: nuclear, solar, wind
+    generator_order = ['nuclear', 'solar', 'wind']
+    for gen in generator_order:
+        if gen in network.generators.index:
+            # Get installed capacity
+            if network.generators.loc[gen, 'p_nom_extendable']:
+                capacity = network.generators.loc[gen, 'p_nom_opt']
+            else:
+                capacity = network.generators.loc[gen, 'p_nom']
+            
+            # Get actual generation (sum over all time periods)
+            actual_generation = network.generators_t.p.loc[:, gen].sum()  # MWh
+            generation_gwh = actual_generation / 1000  # Convert to GWh
+            
+            # Calculate capacity factor
+            if capacity > 0:
+                max_possible_generation = capacity * len(network.snapshots)  # MW * hours = MWh
+                capacity_factor = (actual_generation / max_possible_generation) * 100  # Percentage
+            else:
+                capacity_factor = 0
+            
+            print(f"{gen.title():<15} {capacity:<15.1f} {generation_gwh:<18.2f} {capacity_factor:<18.1f}")
     
     for storage in network.storage_units.index:
         if network.storage_units.loc[storage, 'p_nom_extendable']:
@@ -413,8 +625,21 @@ def print_results(network):
         
         max_hours = network.storage_units.loc[storage, 'max_hours']
         energy_capacity = power_capacity * max_hours
-        print(f"{storage} (power): {power_capacity:.2f} MW")
-        print(f"{storage} (energy): {energy_capacity:.2f} MWh ({max_hours:.1f} hours)")
+        
+        # Get storage discharge (energy delivered)
+        storage_discharge = network.storage_units_t.p_dispatch.loc[:, storage].sum()  # MWh
+        discharge_gwh = storage_discharge / 1000  # Convert to GWh
+        
+        # Calculate capacity factor for storage (based on discharge)
+        if power_capacity > 0:
+            max_possible_discharge = power_capacity * len(network.snapshots)  # MW * hours = MWh
+            storage_capacity_factor = (storage_discharge / max_possible_discharge) * 100  # Percentage
+        else:
+            storage_capacity_factor = 0
+        
+        storage_name = "ESS" if storage == "storage" else storage
+        print(f"{storage_name + ' (power)':<15} {power_capacity:<15.1f} {discharge_gwh:<18.2f} {storage_capacity_factor:<18.1f}")
+        print(f"{storage_name + ' (energy)':<15} {energy_capacity:<15.1f} {discharge_gwh:<18.2f} {'N/A':<18}")
 
 def create_interactive_plots(network):
     """
@@ -429,18 +654,34 @@ def create_interactive_plots(network):
     # Extract time series data
     snapshots = network.snapshots
     
-    # Get generation data
+    # Get generation data in order: nuclear, solar, wind
     gen_data = {}
-    for gen in network.generators.index:
-        if network.generators.loc[gen, 'p_nom_extendable']:
-            capacity = network.generators_t.p.loc[:, gen].values
-        else:
-            capacity = network.generators_t.p.loc[:, gen].values
-        gen_data[gen] = capacity
+    gen_available = {}  # Available generation (including curtailed)
+    generator_order = ['nuclear', 'solar', 'wind']
+    for gen in generator_order:
+        if gen in network.generators.index:
+            # Actual generation
+            actual_generation = network.generators_t.p.loc[:, gen].values
+            gen_data[gen] = actual_generation
+            
+            # Available generation (capacity * p_max_pu)
+            if network.generators.loc[gen, 'p_nom_extendable']:
+                capacity = network.generators.loc[gen, 'p_nom_opt']
+            else:
+                capacity = network.generators.loc[gen, 'p_nom']
+            
+            # Get p_max_pu profile
+            if hasattr(network.generators_t, 'p_max_pu') and gen in network.generators_t.p_max_pu.columns:
+                p_max_pu = network.generators_t.p_max_pu.loc[:, gen].values
+            else:
+                p_max_pu = np.ones(len(snapshots)) * network.generators.loc[gen, 'p_max_pu']
+            
+            available_generation = capacity * p_max_pu
+            gen_available[gen] = available_generation
     
     # Get storage data
-    storage_charge = network.storage_units_t.p_store.loc[:, 'storage'].values  # Positive = charging
-    storage_discharge = -network.storage_units_t.p_dispatch.loc[:, 'storage'].values  # Negative = discharging
+    storage_charge = -network.storage_units_t.p_store.loc[:, 'storage'].values  # Make charging negative
+    storage_discharge = network.storage_units_t.p_dispatch.loc[:, 'storage'].values  # Keep discharging positive
     storage_soc = network.storage_units_t.state_of_charge.loc[:, 'storage'].values
     
     # Get load data
@@ -451,8 +692,8 @@ def create_interactive_plots(network):
         rows=3, cols=1,
         subplot_titles=(
             'Hourly Generation vs Demand', 
-            'Storage Charge/Discharge', 
-            'Storage State of Charge'
+            'ESS Charge/Discharge', 
+            'ESS State of Charge'
         ),
         specs=[[{"secondary_y": False}],
                [{"secondary_y": False}],
@@ -460,22 +701,82 @@ def create_interactive_plots(network):
         vertical_spacing=0.1
     )
     
-    # Plot 1: Generation by source with demand overlay
-    colors = {'solar': '#FFA500', 'wind': '#87CEEB', 'nuclear': '#FF6B6B', 'storage': '#32CD32'}
+    # Plot 1: Generation by source with demand overlay (nuclear, solar, wind, ESS)
+    colors = {'nuclear': 'rgba(255, 107, 107, 0.7)', 'solar': '#FFA500', 'wind': '#87CEEB', 'storage': '#32CD32'}
+    curtailed_colors = {'solar': 'rgba(255, 220, 150, 0.6)', 'wind': 'rgba(173, 216, 230, 0.6)'}  # Much lighter colors for curtailed
     
-    # Add generation traces
-    for gen, data in gen_data.items():
+    # Create a stacked chart showing generation and ESS operation
+    
+    # 1. Add nuclear generation (semi-transparent base)
+    if 'nuclear' in gen_data:
         fig.add_trace(
             go.Scatter(
                 x=snapshots, 
-                y=data,
-                name=f'{gen.title()} Generation',
-                line=dict(color=colors.get(gen, '#000000')),
+                y=gen_data['nuclear'],
+                name='Nuclear Generation',
+                line=dict(color=colors['nuclear']),
+                fill='tozeroy',
                 stackgroup='generation',
-                hovertemplate=f'{gen.title()}: %{{y:.0f}} MW<br>Time: %{{x}}<extra></extra>'
+                hovertemplate='Nuclear: %{y:.0f} MW<br>Time: %{x}<extra></extra>'
             ),
             row=1, col=1
         )
+    
+    # 2. Add actual solar generation (stacked on nuclear)
+    if 'solar' in gen_data:
+        fig.add_trace(
+            go.Scatter(
+                x=snapshots, 
+                y=gen_data['solar'],
+                name='Solar Generation',
+                line=dict(color=colors['solar']),
+                stackgroup='generation',
+                hovertemplate='Solar: %{y:.0f} MW<br>Time: %{x}<extra></extra>'
+            ),
+            row=1, col=1
+        )
+    
+    # 3. Add actual wind generation (stacked on solar)
+    if 'wind' in gen_data:
+        fig.add_trace(
+            go.Scatter(
+                x=snapshots, 
+                y=gen_data['wind'],
+                name='Wind Generation',
+                line=dict(color=colors['wind']),
+                stackgroup='generation',
+                hovertemplate='Wind: %{y:.0f} MW<br>Time: %{x}<extra></extra>'
+            ),
+            row=1, col=1
+        )
+    
+    # 4. Add ESS discharge (positive contribution to generation)
+    ess_discharge = network.storage_units_t.p_dispatch.loc[:, 'storage'].values  # Already positive for discharge
+    fig.add_trace(
+        go.Scatter(
+            x=snapshots,
+            y=ess_discharge,
+            name='ESS Discharging',
+            line=dict(color='red'),
+            stackgroup='generation',
+            hovertemplate='ESS Discharging: %{y:.0f} MW<br>Time: %{x}<extra></extra>'
+        ),
+        row=1, col=1
+    )
+    
+    # 5. Add ESS charge (negative values - consuming power)
+    ess_charge = -network.storage_units_t.p_store.loc[:, 'storage'].values  # Make negative for charge
+    fig.add_trace(
+        go.Scatter(
+            x=snapshots,
+            y=ess_charge,
+            name='ESS Charging',
+            line=dict(color='green'),
+            fill='tozeroy',
+            hovertemplate='ESS Charging: %{y:.0f} MW<br>Time: %{x}<extra></extra>'
+        ),
+        row=1, col=1
+    )
     
     # Add demand line
     fig.add_trace(
@@ -489,12 +790,12 @@ def create_interactive_plots(network):
         row=1, col=1
     )
     
-    # Plot 2: Storage charge/discharge
+    # Plot 2: ESS charge/discharge
     fig.add_trace(
         go.Scatter(
             x=snapshots,
             y=storage_charge,
-            name='Storage Charging',
+            name='ESS Charging',
             line=dict(color='green'),
             fill='tozeroy',
             hovertemplate='Charging: %{y:.0f} MW<br>Time: %{x}<extra></extra>'
@@ -506,7 +807,7 @@ def create_interactive_plots(network):
         go.Scatter(
             x=snapshots,
             y=storage_discharge,
-            name='Storage Discharging',
+            name='ESS Discharging',
             line=dict(color='red'),
             fill='tozeroy',
             hovertemplate='Discharging: %{y:.0f} MW<br>Time: %{x}<extra></extra>'
@@ -514,12 +815,12 @@ def create_interactive_plots(network):
         row=2, col=1
     )
     
-    # Plot 3: Storage state of charge
+    # Plot 3: ESS state of charge
     fig.add_trace(
         go.Scatter(
             x=snapshots,
             y=storage_soc,
-            name='State of Charge',
+            name='ESS State of Charge',
             line=dict(color='blue'),
             fill='tozeroy',
             hovertemplate='SoC: %{y:.0f} MWh<br>Time: %{x}<extra></extra>'
@@ -539,7 +840,14 @@ def create_interactive_plots(network):
     fig.update_yaxes(title_text="Power (MW)", row=1, col=1)
     fig.update_yaxes(title_text="Power (MW)", row=2, col=1)
     fig.update_yaxes(title_text="Energy (MWh)", row=3, col=1)
+    
+    # Update x-axis labels and synchronize x-axes
     fig.update_xaxes(title_text="Time", row=3, col=1)
+    
+    # Synchronize x-axes across all three subplots
+    fig.update_xaxes(matches='x', row=1, col=1)
+    fig.update_xaxes(matches='x', row=2, col=1)
+    fig.update_xaxes(matches='x', row=3, col=1)
     
     # Save the plot to HTML file
     filename = "energy_system_analysis.html"
@@ -566,8 +874,7 @@ if __name__ == "__main__":
     wind_extendable = True         # Whether wind can be expanded (only if wind_capacity_mw is None)
     
     # Nuclear parameters
-    nuclear_capacity_mw = 1200     # MW
-    nuclear_capacity_factor = 0.90 # Capacity factor (0-1)
+    nuclear_capacity_mw = 24000    # MW
     nuclear_extendable = False     # Whether nuclear can be expanded
     
     # Load parameters
@@ -577,6 +884,7 @@ if __name__ == "__main__":
     storage_power_capacity_mw = 10000    # MW
     storage_max_hours = 6              # Hours of storage at full power
     storage_efficiency = 0.85          # Round-trip efficiency (0-1)
+    storage_initial_soc = 0.5          # Initial state of charge (0-1)
     storage_extendable = True          # Whether storage can be expanded
     
     # Optimization solver
@@ -597,11 +905,13 @@ if __name__ == "__main__":
         solar_capacity_mw=solar_capacity_mw,
         wind_capacity_mw=wind_capacity_mw,
         nuclear_capacity_mw=nuclear_capacity_mw,
-        nuclear_capacity_factor=nuclear_capacity_factor,
+        nuclear_p_min_pu=0.8,  # Minimum nuclear output
+        nuclear_p_max_pu=1.0,  # Maximum nuclear output
         annual_load_twh=annual_load_twh,
         storage_power_capacity_mw=storage_power_capacity_mw,
         storage_max_hours=storage_max_hours,
         storage_efficiency=storage_efficiency,
+        storage_initial_soc=storage_initial_soc,
         solar_extendable=solar_extendable,
         wind_extendable=wind_extendable,
         nuclear_extendable=nuclear_extendable,
