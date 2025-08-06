@@ -206,9 +206,8 @@ def create_single_bus_model(
         
         # Handle datetime creation based on available columns
         if 'date' in gen_data.columns and 'time' in gen_data.columns:
-            # Combine separate date and time columns
-            gen_data['datetime'] = pd.to_datetime(gen_data['date'].astype(str) + ' ' + gen_data['time'].astype(str), 
-                                                errors='coerce')
+            # Combine separate date and time columns - date contains full datetime, time is hour offset
+            gen_data['datetime'] = pd.to_datetime(gen_data['date']) + pd.to_timedelta(gen_data['time'], unit='h')
         elif 'date' in gen_data.columns:
             # Only date column, assume hourly data
             gen_data['datetime'] = pd.to_datetime(gen_data['date'], errors='coerce')
