@@ -24,6 +24,17 @@ def run_energy_system_optimization(
     hydrogen_capacity_mw=0,
     storage_power_capacity_mw=10000,
     storage_max_hours=6,
+    # Individual capacity bounds (p_nom_min/max for extendable generators)
+    solar_p_nom_min=None,
+    solar_p_nom_max=None,
+    wind_p_nom_min=None,
+    wind_p_nom_max=None,
+    nuclear_p_nom_min=None,
+    nuclear_p_nom_max=None,
+    hydrogen_p_nom_min=None,
+    hydrogen_p_nom_max=None,
+    storage_p_nom_min=None,
+    storage_p_nom_max=None,
     # Operational parameters
     nuclear_p_min_pu=0.8,
     nuclear_p_max_pu=1.0,
@@ -40,13 +51,16 @@ def run_energy_system_optimization(
     nuclear_extendable=False,
     hydrogen_extendable=False,
     storage_extendable=True,
-    max_capacity_multiplier=20.0,
-    # Cost parameters ($/kW)
+    # Cost parameters ($/kW for capital, $/MWh for marginal)
     solar_capital_cost=1000,
     wind_capital_cost=1500,
     nuclear_capital_cost=6000,
     hydrogen_capital_cost=1200,
     storage_capital_cost=500,
+    solar_marginal_cost=0.1,
+    wind_marginal_cost=0.1,
+    nuclear_marginal_cost=0.1,
+    storage_marginal_cost=0.1,
     # Optimization settings
     solver='highs',
     custom_constraints=None,
@@ -137,17 +151,34 @@ def run_energy_system_optimization(
             storage_charge_efficiency=storage_charge_efficiency,
             storage_discharge_efficiency=storage_discharge_efficiency,
             storage_initial_soc=storage_initial_soc,
+            # Individual capacity bounds
+            solar_p_nom_min=solar_p_nom_min,
+            solar_p_nom_max=solar_p_nom_max,
+            wind_p_nom_min=wind_p_nom_min,
+            wind_p_nom_max=wind_p_nom_max,
+            nuclear_p_nom_min=nuclear_p_nom_min,
+            nuclear_p_nom_max=nuclear_p_nom_max,
+            hydrogen_p_nom_min=hydrogen_p_nom_min,
+            hydrogen_p_nom_max=hydrogen_p_nom_max,
+            storage_p_nom_min=storage_p_nom_min,
+            storage_p_nom_max=storage_p_nom_max,
+            # Extendable options
             solar_extendable=solar_extendable,
             wind_extendable=wind_extendable,
             nuclear_extendable=nuclear_extendable,
             hydrogen_extendable=hydrogen_extendable,
             storage_extendable=storage_extendable,
-            max_capacity_multiplier=max_capacity_multiplier,
+            # Capital costs
             solar_capital_cost=solar_capital_cost,
             wind_capital_cost=wind_capital_cost,
             nuclear_capital_cost=nuclear_capital_cost,
             hydrogen_capital_cost=hydrogen_capital_cost,
-            storage_capital_cost=storage_capital_cost
+            storage_capital_cost=storage_capital_cost,
+            # Marginal costs
+            solar_marginal_cost=solar_marginal_cost,
+            wind_marginal_cost=wind_marginal_cost,
+            nuclear_marginal_cost=nuclear_marginal_cost,
+            storage_marginal_cost=storage_marginal_cost
         )
 
         if verbose:

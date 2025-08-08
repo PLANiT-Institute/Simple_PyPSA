@@ -30,19 +30,10 @@ with left_col:
         "Annual Load (TWh)",
         value=700.0,
         min_value=10.0,
-        max_value=10000.0,
         step=50.0,
         help="Total annual electricity demand"
     )
 
-    max_capacity_multiplier = st.number_input(
-        "Max Capacity Multiplier",
-        min_value=0.5,
-        max_value=50.0,
-        value=20.0,
-        step=0.5,
-        help="Maximum capacity as multiplier of minimum (e.g., 2.0 = 200% of min)"
-    )
 
     solver = st.selectbox(
         "Optimization Solver",
@@ -53,59 +44,141 @@ with left_col:
 
     # Solar parameters
     st.subheader("🌞 Solar Generation")
-    solar_capacity = st.number_input(
-        "Solar Capacity (MW)",
-        value=200000,
-        min_value=1000,
-        max_value=1000000,
-        step=10000,
-        help="Minimum solar capacity (p_nom_min if extendable)"
-    )
+    
+    solar_extendable = st.checkbox("Solar Extendable", value=False)
+    
+    if solar_extendable:
+        solar_p_nom_min = st.number_input(
+            "Minimum Capacity (when extendable) (MW)",
+            value=200000,
+            min_value=0,
+            step=10000,
+            help="Minimum solar capacity for optimization"
+        )
+        
+        solar_p_nom_max = st.number_input(
+            "Maximum Capacity (when extendable) (MW)",
+            value=500000,
+            min_value=0,
+            step=10000,
+            help="Maximum solar capacity for optimization"
+        )
+        
+        solar_capacity = None  # Not used when extendable
+    else:
+        solar_capacity = st.number_input(
+            "Fixed Capacity (MW)",
+            value=200000,
+            min_value=0,
+            step=10000,
+            help="Fixed solar capacity (not optimized)"
+        )
+        
+        solar_p_nom_min = None  # Not used when not extendable
+        solar_p_nom_max = None  # Not used when not extendable
 
     solar_cost = st.number_input(
         "Solar Capital Cost ($/kW)",
         value=1000,
-        min_value=100,
-        max_value=10000,
+        min_value=0,
         step=100
     )
-
-    solar_extendable = st.checkbox("Solar Extendable", value=True)
+    
+    solar_marginal_cost = st.number_input(
+        "Solar Marginal Cost ($/MWh)",
+        value=0.1,
+        min_value=0.0,
+        step=0.1,
+        help="Operational cost per MWh of solar generation"
+    )
 
     # Wind parameters
     st.subheader("💨 Wind Generation")
-    wind_capacity = st.number_input(
-        "Wind Capacity (MW)",
-        value=100000,
-        min_value=1000,
-        max_value=1000000,
-        step=10000,
-        help="Minimum wind capacity (p_nom_min if extendable)"
-    )
+    
+    wind_extendable = st.checkbox("Wind Extendable", value=False)
+    
+    if wind_extendable:
+        wind_p_nom_min = st.number_input(
+            "Minimum Capacity (when extendable) (MW)",
+            value=100000,
+            min_value=0,
+            step=10000,
+            help="Minimum wind capacity for optimization"
+        )
+        
+        wind_p_nom_max = st.number_input(
+            "Maximum Capacity (when extendable) (MW)",
+            value=300000,
+            min_value=0,
+            step=10000,
+            help="Maximum wind capacity for optimization"
+        )
+        
+        wind_capacity = None  # Not used when extendable
+    else:
+        wind_capacity = st.number_input(
+            "Fixed Capacity (MW)",
+            value=100000,
+            min_value=0,
+            step=10000,
+            help="Fixed wind capacity (not optimized)"
+        )
+        
+        wind_p_nom_min = None  # Not used when not extendable
+        wind_p_nom_max = None  # Not used when not extendable
 
     wind_cost = st.number_input(
         "Wind Capital Cost ($/kW)",
         value=1500,
-        min_value=100,
-        max_value=10000,
+        min_value=0,
         step=100
     )
-
-    wind_extendable = st.checkbox("Wind Extendable", value=True)
+    
+    wind_marginal_cost = st.number_input(
+        "Wind Marginal Cost ($/MWh)",
+        value=0.1,
+        min_value=0.0,
+        step=0.1,
+        help="Operational cost per MWh of wind generation"
+    )
 
     # Nuclear parameters
     st.subheader("⚛️ Nuclear Generation")
-    nuclear_capacity = st.number_input(
-        "Nuclear Capacity (MW)",
-        value=24000,
-        min_value=0,
-        max_value=50000,
-        step=100,
-        help="Nuclear plant capacity"
-    )
+    
+    nuclear_extendable = st.checkbox("Nuclear Extendable", value=False)
+    
+    if nuclear_extendable:
+        nuclear_p_nom_min = st.number_input(
+            "Minimum Capacity (when extendable) (MW)",
+            value=24000,
+            min_value=0,
+            step=100,
+            help="Minimum nuclear capacity for optimization"
+        )
+        
+        nuclear_p_nom_max = st.number_input(
+            "Maximum Capacity (when extendable) (MW)",
+            value=50000,
+            min_value=0,
+            step=100,
+            help="Maximum nuclear capacity for optimization"
+        )
+        
+        nuclear_capacity = None  # Not used when extendable
+    else:
+        nuclear_capacity = st.number_input(
+            "Fixed Capacity (MW)",
+            value=24000,
+            min_value=0,
+            step=100,
+            help="Fixed nuclear capacity (not optimized)"
+        )
+        
+        nuclear_p_nom_min = None  # Not used when not extendable
+        nuclear_p_nom_max = None  # Not used when not extendable
 
     nuclear_p_min_pu = st.number_input(
-        "Nuclear p_min_pu",
+        "Minimum Power Output Limit",
         value=0.8,
         min_value=0.0,
         max_value=1.0,
@@ -114,7 +187,7 @@ with left_col:
     )
 
     nuclear_p_max_pu = st.number_input(
-        "Nuclear p_max_pu",
+        "Maximum Power Output Limit",
         value=1.0,
         min_value=0.0,
         max_value=1.0,
@@ -125,26 +198,55 @@ with left_col:
     nuclear_cost = st.number_input(
         "Nuclear Capital Cost ($/kW)",
         value=6000,
-        min_value=1000,
-        max_value=20000,
+        min_value=0,
         step=500
     )
-
-    nuclear_extendable = st.checkbox("Nuclear Extendable", value=False)
+    
+    nuclear_marginal_cost = st.number_input(
+        "Nuclear Marginal Cost ($/MWh)",
+        value=0.1,
+        min_value=0.0,
+        step=0.1,
+        help="Operational cost per MWh of nuclear generation"
+    )
 
     # Hydrogen parameters
     st.subheader("🔋 Hydrogen Generation")
-    hydrogen_capacity = st.number_input(
-        "Hydrogen Capacity (MW)",
-        value=0,
-        min_value=0,
-        max_value=50000,
-        step=500,
-        help="Hydrogen generator capacity (0 = disabled, unlimited fuel source)"
-    )
+    
+    hydrogen_extendable = st.checkbox("Hydrogen Extendable", value=False)
+    
+    if hydrogen_extendable:
+        hydrogen_p_nom_min = st.number_input(
+            "Minimum Capacity (when extendable) (MW)",
+            value=0,
+            min_value=0,
+            step=500,
+            help="Minimum hydrogen capacity for optimization"
+        )
+        
+        hydrogen_p_nom_max = st.number_input(
+            "Maximum Capacity (when extendable) (MW)",
+            value=50000,
+            min_value=0,
+            step=500,
+            help="Maximum hydrogen capacity for optimization"
+        )
+        
+        hydrogen_capacity = None  # Not used when extendable
+    else:
+        hydrogen_capacity = st.number_input(
+            "Fixed Capacity (MW)",
+            value=0,
+            min_value=0,
+            step=500,
+            help="Fixed hydrogen capacity (0 = disabled, unlimited fuel source)"
+        )
+        
+        hydrogen_p_nom_min = None  # Not used when not extendable
+        hydrogen_p_nom_max = None  # Not used when not extendable
 
     hydrogen_p_min_pu = st.number_input(
-        "Hydrogen p_min_pu",
+        "Minimum Power Output Limit",
         value=0.0,
         min_value=0.0,
         max_value=1.0,
@@ -153,7 +255,7 @@ with left_col:
     )
 
     hydrogen_p_max_pu = st.number_input(
-        "Hydrogen p_max_pu",
+        "Maximum Power Output Limit",
         value=1.0,
         min_value=0.0,
         max_value=1.0,
@@ -165,7 +267,6 @@ with left_col:
         "Hydrogen Marginal Cost ($/MWh)",
         value=50.0,
         min_value=0.0,
-        max_value=200.0,
         step=5.0,
         help="Fuel cost for hydrogen generation (higher cost = less preferred)"
     )
@@ -173,29 +274,49 @@ with left_col:
     hydrogen_cost = st.number_input(
         "Hydrogen Capital Cost ($/kW)",
         value=1200,
-        min_value=500,
-        max_value=3000,
+        min_value=0,
         step=100
     )
 
-    hydrogen_extendable = st.checkbox("Hydrogen Extendable", value=False)
-
     # Storage parameters
     st.subheader("🔋 Energy Storage")
-    storage_capacity = st.number_input(
-        "Storage Power (MW)",
-        value=10000,
-        min_value=100,
-        max_value=500000,
-        step=1000,
-        help="Storage power capacity"
-    )
+    
+    storage_extendable = st.checkbox("Storage Extendable", value=False)
+    
+    if storage_extendable:
+        storage_p_nom_min = st.number_input(
+            "Minimum Capacity (when extendable) (MW)",
+            value=10000,
+            min_value=0,
+            step=1000,
+            help="Minimum storage power capacity for optimization"
+        )
+        
+        storage_p_nom_max = st.number_input(
+            "Maximum Capacity (when extendable) (MW)",
+            value=100000,
+            min_value=0,
+            step=1000,
+            help="Maximum storage power capacity for optimization"
+        )
+        
+        storage_capacity = None  # Not used when extendable
+    else:
+        storage_capacity = st.number_input(
+            "Fixed Capacity (MW)",
+            value=10000,
+            min_value=0,
+            step=1000,
+            help="Fixed storage power capacity (not optimized)"
+        )
+        
+        storage_p_nom_min = None  # Not used when not extendable
+        storage_p_nom_max = None  # Not used when not extendable
 
     storage_hours = st.number_input(
         "Storage Hours",
         value=6.0,
-        min_value=1.0,
-        max_value=24.0,
+        min_value=0.0,
         step=0.5
     )
 
@@ -220,12 +341,17 @@ with left_col:
     storage_cost = st.number_input(
         "Storage Capital Cost ($/kW)",
         value=500,
-        min_value=100,
-        max_value=5000,
+        min_value=0,
         step=100
     )
-
-    storage_extendable = st.checkbox("Storage Extendable", value=True)
+    
+    storage_marginal_cost = st.number_input(
+        "Storage Marginal Cost ($/MWh)",
+        value=0.1,
+        min_value=0.0,
+        step=0.1,
+        help="Operational cost per MWh of storage operation (charge/discharge)"
+    )
 
     storage_initial_soc = st.number_input(
         "Initial State of Charge",
@@ -241,38 +367,66 @@ with left_col:
     if st.button("🚀 Run Optimization", type="primary", use_container_width=True):
         with st.spinner("Running optimization... This may take a few minutes."):
             try:
-                optimization_result = run_energy_system_optimization(
-                    annual_load_twh=annual_load,
-                    solar_capacity_mw=solar_capacity,
-                    wind_capacity_mw=wind_capacity,
-                    nuclear_capacity_mw=nuclear_capacity,
-                    hydrogen_capacity_mw=hydrogen_capacity,
-                    storage_power_capacity_mw=storage_capacity,
-                    storage_max_hours=storage_hours,
-                    nuclear_p_min_pu=nuclear_p_min_pu,
-                    nuclear_p_max_pu=nuclear_p_max_pu,
-                    hydrogen_p_min_pu=hydrogen_p_min_pu,
-                    hydrogen_p_max_pu=hydrogen_p_max_pu,
-                    hydrogen_marginal_cost=hydrogen_marginal_cost,
-                    storage_efficiency=storage_charge_efficiency * storage_discharge_efficiency,
-                    storage_charge_efficiency=storage_charge_efficiency,
-                    storage_discharge_efficiency=storage_discharge_efficiency,
-                    storage_initial_soc=storage_initial_soc,
-                    solar_extendable=solar_extendable,
-                    wind_extendable=wind_extendable,
-                    nuclear_extendable=nuclear_extendable,
-                    hydrogen_extendable=hydrogen_extendable,
-                    storage_extendable=storage_extendable,
-                    max_capacity_multiplier=max_capacity_multiplier,
-                    solar_capital_cost=solar_cost,
-                    wind_capital_cost=wind_cost,
-                    nuclear_capital_cost=nuclear_cost,
-                    hydrogen_capital_cost=hydrogen_cost,
-                    storage_capital_cost=storage_cost,
-                    solver=solver,
-                    verbose=False,
-                    create_plots=False,
-                )
+                # Prepare parameters, only pass non-None values
+                optimization_params = {
+                    'annual_load_twh': annual_load,
+                    'solar_capacity_mw': solar_capacity,
+                    'wind_capacity_mw': wind_capacity,
+                    'nuclear_capacity_mw': nuclear_capacity,
+                    'hydrogen_capacity_mw': hydrogen_capacity,
+                    'storage_power_capacity_mw': storage_capacity,
+                    'storage_max_hours': storage_hours,
+                    'nuclear_p_min_pu': nuclear_p_min_pu,
+                    'nuclear_p_max_pu': nuclear_p_max_pu,
+                    'hydrogen_p_min_pu': hydrogen_p_min_pu,
+                    'hydrogen_p_max_pu': hydrogen_p_max_pu,
+                    'hydrogen_marginal_cost': hydrogen_marginal_cost,
+                    'storage_efficiency': storage_charge_efficiency * storage_discharge_efficiency,
+                    'storage_charge_efficiency': storage_charge_efficiency,
+                    'storage_discharge_efficiency': storage_discharge_efficiency,
+                    'storage_initial_soc': storage_initial_soc,
+                    'solar_extendable': solar_extendable,
+                    'wind_extendable': wind_extendable,
+                    'nuclear_extendable': nuclear_extendable,
+                    'hydrogen_extendable': hydrogen_extendable,
+                    'storage_extendable': storage_extendable,
+                    'solar_capital_cost': solar_cost,
+                    'wind_capital_cost': wind_cost,
+                    'nuclear_capital_cost': nuclear_cost,
+                    'hydrogen_capital_cost': hydrogen_cost,
+                    'storage_capital_cost': storage_cost,
+                    'solar_marginal_cost': solar_marginal_cost,
+                    'wind_marginal_cost': wind_marginal_cost,
+                    'nuclear_marginal_cost': nuclear_marginal_cost,
+                    'storage_marginal_cost': storage_marginal_cost,
+                    'solver': solver,
+                    'verbose': False,
+                    'create_plots': False,
+                }
+                
+                # Add individual p_nom_min/max parameters if they are not None
+                if solar_p_nom_min is not None:
+                    optimization_params['solar_p_nom_min'] = solar_p_nom_min
+                if solar_p_nom_max is not None:
+                    optimization_params['solar_p_nom_max'] = solar_p_nom_max
+                if wind_p_nom_min is not None:
+                    optimization_params['wind_p_nom_min'] = wind_p_nom_min
+                if wind_p_nom_max is not None:
+                    optimization_params['wind_p_nom_max'] = wind_p_nom_max
+                if nuclear_p_nom_min is not None:
+                    optimization_params['nuclear_p_nom_min'] = nuclear_p_nom_min
+                if nuclear_p_nom_max is not None:
+                    optimization_params['nuclear_p_nom_max'] = nuclear_p_nom_max
+                if hydrogen_p_nom_min is not None:
+                    optimization_params['hydrogen_p_nom_min'] = hydrogen_p_nom_min
+                if hydrogen_p_nom_max is not None:
+                    optimization_params['hydrogen_p_nom_max'] = hydrogen_p_nom_max
+                if storage_p_nom_min is not None:
+                    optimization_params['storage_p_nom_min'] = storage_p_nom_min
+                if storage_p_nom_max is not None:
+                    optimization_params['storage_p_nom_max'] = storage_p_nom_max
+                
+                optimization_result = run_energy_system_optimization(**optimization_params)
 
                 if optimization_result['status'] == 'success':
                     st.session_state.optimization_result = optimization_result

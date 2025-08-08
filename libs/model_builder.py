@@ -27,17 +27,31 @@ def create_single_bus_model(
     storage_charge_efficiency=0.95,
     storage_discharge_efficiency=0.95,
     storage_initial_soc=0.5,
+    # Individual capacity bounds (p_nom_min/max for extendable generators)
+    solar_p_nom_min=None,
+    solar_p_nom_max=None,
+    wind_p_nom_min=None,
+    wind_p_nom_max=None,
+    nuclear_p_nom_min=None,
+    nuclear_p_nom_max=None,
+    hydrogen_p_nom_min=None,
+    hydrogen_p_nom_max=None,
+    storage_p_nom_min=None,
+    storage_p_nom_max=None,
     solar_extendable=True,
     wind_extendable=True,
     nuclear_extendable=False,
     hydrogen_extendable=False,
     storage_extendable=True,
-    max_capacity_multiplier=2.0,
     solar_capital_cost=1000,
     wind_capital_cost=1500,
     nuclear_capital_cost=6000,
     hydrogen_capital_cost=1200,
-    storage_capital_cost=500
+    storage_capital_cost=500,
+    solar_marginal_cost=0.1,
+    wind_marginal_cost=0.1,
+    nuclear_marginal_cost=0.1,
+    storage_marginal_cost=0.1
 ):
     """
     Create a single bus PyPSA model with solar, wind, nuclear, and aggregated storage.
@@ -108,47 +122,80 @@ def create_single_bus_model(
     wind_capacity_factor = wind_absolute / wind_max_capacity
 
     actual_solar_capacity = solar_capacity_mw if solar_capacity_mw is not None else solar_max_capacity
+    actual_solar_capacity = actual_solar_capacity if actual_solar_capacity is not None else 0  # Ensure not None
 
     solar_params = {
         "name": "solar",
         "bus": "bus",
         "carrier": "solar",
         "p_nom_extendable": solar_extendable,
-        "marginal_cost": 0,
+        "marginal_cost": solar_marginal_cost,
         "capital_cost": solar_capital_cost,
         "p_max_pu": solar_capacity_factor
     }
 
     if solar_extendable:
-        solar_params["p_nom_min"] = actual_solar_capacity
-        solar_params["p_nom_max"] = actual_solar_capacity * max_capacity_multiplier
-        solar_params["p_nom"] = actual_solar_capacity  # Starting point
+        # Use individual bounds if provided, otherwise use capacity as min and fallback max
+        p_nom_min = solar_p_nom_min if solar_p_nom_min is not None else actual_solar_capacity
+        # For default max: if capacity is 0, use a reasonable default, otherwise use capacity * 10
+        if solar_p_nom_max is not None:
+            p_nom_max = solar_p_nom_max
+        elif actual_solar_capacity and actual_solar_capacity > 0:
+            p_nom_max = actual_solar_capacity * 10
+        else:
+            p_nom_max = 1000000  # Default max when starting from 0 capacity
+        
+        solar_params["p_nom_min"] = p_nom_min
+        solar_params["p_nom_max"] = p_nom_max
+        solar_params["p_nom"] = p_nom_min  # Starting point at minimum
     else:
         solar_params["p_nom"] = actual_solar_capacity
 
-    network.add("Generator", **solar_params)
+    # Only add solar if it has capacity > 0 or is extendable
+    if actual_solar_capacity > 0 or solar_extendable:
+        network.add("Generator", **solar_params)
+    else:
+        print("Skipping solar generator (0 capacity and not extendable)")
 
     actual_wind_capacity = wind_capacity_mw if wind_capacity_mw is not None else wind_max_capacity
+    actual_wind_capacity = actual_wind_capacity if actual_wind_capacity is not None else 0  # Ensure not None
 
     wind_params = {
         "name": "wind",
         "bus": "bus",
         "carrier": "wind",
         "p_nom_extendable": wind_extendable,
-        "marginal_cost": 0,
+        "marginal_cost": wind_marginal_cost,
         "capital_cost": wind_capital_cost,
         "p_max_pu": wind_capacity_factor
     }
 
     if wind_extendable:
-        wind_params["p_nom_min"] = actual_wind_capacity
-        wind_params["p_nom_max"] = actual_wind_capacity * max_capacity_multiplier
-        wind_params["p_nom"] = actual_wind_capacity  # Starting point
+        # Use individual bounds if provided, otherwise use capacity as min and fallback max
+        p_nom_min = wind_p_nom_min if wind_p_nom_min is not None else actual_wind_capacity
+        # For default max: if capacity is 0, use a reasonable default, otherwise use capacity * 10
+        if wind_p_nom_max is not None:
+            p_nom_max = wind_p_nom_max
+        elif actual_wind_capacity and actual_wind_capacity > 0:
+            p_nom_max = actual_wind_capacity * 10
+        else:
+            p_nom_max = 500000  # Default max when starting from 0 capacity
+        
+        wind_params["p_nom_min"] = p_nom_min
+        wind_params["p_nom_max"] = p_nom_max
+        wind_params["p_nom"] = p_nom_min  # Starting point at minimum
     else:
         wind_params["p_nom"] = actual_wind_capacity
 
-    network.add("Generator", **wind_params)
+    # Only add wind if it has capacity > 0 or is extendable
+    if actual_wind_capacity > 0 or wind_extendable:
+        network.add("Generator", **wind_params)
+    else:
+        print("Skipping wind generator (0 capacity and not extendable)")
 
+    # Ensure nuclear capacity is not None for safe comparisons
+    nuclear_capacity_safe = nuclear_capacity_mw if nuclear_capacity_mw is not None else 0
+    
     nuclear_params = {
         "name": "nuclear",
         "bus": "bus",
@@ -156,20 +203,36 @@ def create_single_bus_model(
         "p_min_pu": nuclear_p_min_pu,
         "p_max_pu": nuclear_p_max_pu,
         "p_nom_extendable": nuclear_extendable,
-        "marginal_cost": 0,  # Low but non-zero marginal cost
+        "marginal_cost": nuclear_marginal_cost,
         "capital_cost": nuclear_capital_cost
     }
 
     if nuclear_extendable:
-        nuclear_params["p_nom_min"] = nuclear_capacity_mw
-        nuclear_params["p_nom_max"] = nuclear_capacity_mw * max_capacity_multiplier
-        nuclear_params["p_nom"] = nuclear_capacity_mw  # Starting point
+        # Use individual bounds if provided, otherwise use capacity as min and fallback max
+        p_nom_min = nuclear_p_nom_min if nuclear_p_nom_min is not None else nuclear_capacity_safe
+        # For default max: if capacity is 0, use a reasonable default, otherwise use capacity * 10
+        if nuclear_p_nom_max is not None:
+            p_nom_max = nuclear_p_nom_max
+        elif nuclear_capacity_mw and nuclear_capacity_mw > 0:
+            p_nom_max = nuclear_capacity_mw * 10
+        else:
+            p_nom_max = 100000  # Default max when starting from 0 capacity
+        
+        nuclear_params["p_nom_min"] = p_nom_min
+        nuclear_params["p_nom_max"] = p_nom_max
+        nuclear_params["p_nom"] = p_nom_min  # Starting point at minimum
     else:
-        nuclear_params["p_nom"] = nuclear_capacity_mw
+        nuclear_params["p_nom"] = nuclear_capacity_safe
 
-    network.add("Generator", **nuclear_params)
+    # Only add nuclear if it has capacity > 0 or is extendable
+    if nuclear_capacity_safe > 0 or nuclear_extendable:
+        network.add("Generator", **nuclear_params)
+    else:
+        print("Skipping nuclear generator (0 capacity and not extendable)")
 
-    if hydrogen_capacity_mw > 0:
+    # Add hydrogen generator if capacity > 0 OR if it's extendable (can start from 0 and expand)
+    hydrogen_capacity_safe = hydrogen_capacity_mw if hydrogen_capacity_mw is not None else 0
+    if hydrogen_capacity_safe > 0 or hydrogen_extendable:
         hydrogen_params = {
             "name": "hydrogen",
             "bus": "bus",
@@ -182,16 +245,29 @@ def create_single_bus_model(
         }
 
         if hydrogen_extendable:
-            hydrogen_params["p_nom_min"] = hydrogen_capacity_mw
-            hydrogen_params["p_nom_max"] = hydrogen_capacity_mw * max_capacity_multiplier
-            hydrogen_params["p_nom"] = hydrogen_capacity_mw  # Starting point
+            # Use individual bounds if provided, otherwise use capacity as min and fallback max
+            p_nom_min = hydrogen_p_nom_min if hydrogen_p_nom_min is not None else hydrogen_capacity_safe
+            # For default max: if capacity is 0, use a reasonable default, otherwise use capacity * 10
+            if hydrogen_p_nom_max is not None:
+                p_nom_max = hydrogen_p_nom_max
+            elif hydrogen_capacity_mw and hydrogen_capacity_mw > 0:
+                p_nom_max = hydrogen_capacity_mw * 10
+            else:
+                p_nom_max = 50000  # Default max when starting from 0 capacity
+            
+            hydrogen_params["p_nom_min"] = p_nom_min
+            hydrogen_params["p_nom_max"] = p_nom_max
+            hydrogen_params["p_nom"] = p_nom_min  # Starting point at minimum
         else:
-            hydrogen_params["p_nom"] = hydrogen_capacity_mw
+            hydrogen_params["p_nom"] = hydrogen_capacity_safe
 
         network.add("Generator", **hydrogen_params)
         print(f"Added hydrogen generator: {hydrogen_capacity_mw} MW, marginal cost: ${hydrogen_marginal_cost}/MWh")
 
     network.add("Carrier", "storage")
+
+    # Ensure storage capacity is not None for safe comparisons
+    storage_capacity_safe = storage_power_capacity_mw if storage_power_capacity_mw is not None else 0
 
     storage_params = {
         "name": "storage",
@@ -201,20 +277,34 @@ def create_single_bus_model(
         "max_hours": storage_max_hours,
         "efficiency_store": storage_charge_efficiency,
         "efficiency_dispatch": storage_discharge_efficiency,
-        "marginal_cost": 0,  # Higher cost to discourage unnecessary cycling
+        "marginal_cost": storage_marginal_cost,
         "capital_cost": storage_capital_cost,
         "cyclic_state_of_charge": True,
         "state_of_charge_initial": storage_initial_soc  # Set initial SOC
     }
 
     if storage_extendable:
-        storage_params["p_nom_min"] = storage_power_capacity_mw
-        storage_params["p_nom_max"] = storage_power_capacity_mw * max_capacity_multiplier
-        storage_params["p_nom"] = storage_power_capacity_mw  # Starting point
+        # Use individual bounds if provided, otherwise use capacity as min and fallback max
+        p_nom_min = storage_p_nom_min if storage_p_nom_min is not None else storage_capacity_safe
+        # For default max: if capacity is 0, use a reasonable default, otherwise use capacity * 10
+        if storage_p_nom_max is not None:
+            p_nom_max = storage_p_nom_max
+        elif storage_power_capacity_mw and storage_power_capacity_mw > 0:
+            p_nom_max = storage_power_capacity_mw * 10
+        else:
+            p_nom_max = 200000  # Default max when starting from 0 capacity
+        
+        storage_params["p_nom_min"] = p_nom_min
+        storage_params["p_nom_max"] = p_nom_max
+        storage_params["p_nom"] = p_nom_min  # Starting point at minimum
     else:
-        storage_params["p_nom"] = storage_power_capacity_mw
+        storage_params["p_nom"] = storage_capacity_safe
 
-    network.add("StorageUnit", **storage_params)
+    # Only add storage if it has capacity > 0 or is extendable
+    if storage_capacity_safe > 0 or storage_extendable:
+        network.add("StorageUnit", **storage_params)
+    else:
+        print("Skipping storage unit (0 capacity and not extendable)")
 
     load_profile = load_and_process_load_data_aligned(annual_load_twh, network.snapshots)
 
